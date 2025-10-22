@@ -29,7 +29,7 @@ on:
 # =================================================================
 env:
   NODE_VERSION: '22'
-  DOCKER_IMAGE: 'iamsamitdev/express-app-action'  # เปลี่ยนเป็น Docker Hub username ของคุณ
+  DOCKER_IMAGE: 'devjosh/express-app-action'  # เปลี่ยนเป็น Docker Hub username ของคุณ
 
 # =================================================================
 # JOBS: กำหนด Jobs ที่จะรันใน Workflow
