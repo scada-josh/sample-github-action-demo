@@ -1,19 +1,208 @@
-name: CI
+# =================================================================
+# GitHub Actions CI/CD Pipeline for Express.js Application
+# =================================================================
+# ชื่อ workflow
+name: CI/CD Pipeline - Express App
+
+# =================================================================
+# TRIGGERS: กำหนดเหตุการณ์ที่จะทำให้ workflow ทำงาน
+# =================================================================
+
+# กำหนด Trigger: ให้ Workflow ทำงานทุกครั้งที่มีการ push ไปยัง branch 'main'
 on:
   push:
     branches:
       - main
+    # ถ้าต้องการ build ตอนแท็กด้วย ให้เปิดบรรทัดด้านล่างนี้
+    # tags: [ 'v*.*.*' ]
+
+# กำหนด Trigger: ให้ Workflow ทำงานทุกครั้งที่มีการสร้าง Pull Request ไปยัง branch 'main'
+  pull_request:
+    branches:
+      - main
+
+# กำหนด Trigger: แบบ Manual (Workflow Dispatch) เพื่อให้สามารถกดรันได้เองจากหน้า GitHub
+  workflow_dispatch:
+
+# =================================================================
+# ENVIRONMENT VARIABLES: กำหนดตัวแปรที่ใช้ทั้ง Workflow
+# =================================================================
+env:
+  NODE_VERSION: '22'
+  DOCKER_IMAGE: 'iamsamitdev/express-app-action'  # เปลี่ยนเป็น Docker Hub username ของคุณ
+
+# =================================================================
+# JOBS: กำหนด Jobs ที่จะรันใน Workflow
+# =================================================================
 jobs:
-  build:
+  # Job 1: Build และ Test
+  build-and-test:
+    name: Build & Test
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-      - name: Set up Node.js
-        uses: actions/setup-node@v2
+      # Step 1: Checkout code จาก repository
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      # Step 2: ตั้งค่า Node.js environment
+      - name: 🔧 Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: '22'
-      - name: Install dependencies
-        run: npm install
-      - name: Run tests
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      # Step 3: แสดง Node.js และ npm version
+      - name: 📋 Display Node.js and npm versions
+        run: |
+          echo "Node.js version: $(node --version)"
+          echo "npm version: $(npm --version)"
+      
+      # Step 4: ติดตั้ง dependencies
+      - name: 📦 Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+      
+      # Step 5: รัน tests พร้อม coverage
+      - name: 🧪 Run tests with coverage
         run: npm test
+      
+      # Step 6: Upload coverage report (optional)
+      - name: 📊 Upload coverage report
+        if: always() && hashFiles('coverage/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+
+  # Job 2: Build และ Push Docker Image
+  build-docker:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    # รันเฉพาะเมื่อ push ไปยัง main branch หรือ manual dispatch
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      # Step 1: Checkout code
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      # Step 2: ตั้งค่า Docker Buildx
+      - name: 🔧 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      # Step 3: Login to Docker Hub
+      # หมายเหตุ: ต้องตั้งค่า DOCKERHUB_USERNAME และ DOCKERHUB_TOKEN ใน GitHub Secrets
+      - name: 🔐 Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      # Step 4: สร้าง Docker image metadata (tags และ labels)
+      - name: 🏷️ Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+      
+      # Step 5: Build และ Push Docker image
+      - name: 🐳 Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      # Step 6: แสดง image digest
+      - name: 📝 Image digest
+        run: |
+          echo "Image pushed successfully!"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+
+  # Job 3: Security Scan (Optional - ต้องติดตั้ง Trivy)
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # เพิ่ม permissions สำหรับ security-events
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    
+    steps:
+      # Step 1: Checkout code
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      # Step 2: รัน Trivy vulnerability scanner
+      - name: 🔒 Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE }}:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+        continue-on-error: true
+      
+      # Step 3: Upload Trivy results to GitHub Security
+      - name: 📤 Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+        continue-on-error: true
+
+  # Job 4: Deploy (Optional - ตัวอย่างการ deploy)
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-docker, security-scan]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    environment:
+      name: production
+      url: http://your-app-url.com
+    
+    steps:
+      # Step 1: Checkout code
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      # Step 2: Deploy notification
+      - name: 🚀 Deploy notification
+        run: |
+          echo "Deploying application..."
+          echo "Image: ${{ env.DOCKER_IMAGE }}:latest"
+          echo "Environment: production"
+      
+      # Step 3: Deploy to server (ตัวอย่าง - ต้องปรับแต่งตามจริง)
+      # หากใช้ SSH, ควรเพิ่ม SSH key ใน GitHub Secrets
+      # - name: 🚢 Deploy to server
+      #   uses: appleboy/ssh-action@master
+      #   with:
+      #     host: ${{ secrets.HOST }}
+      #     username: ${{ secrets.USERNAME }}
+      #     key: ${{ secrets.SSH_PRIVATE_KEY }}
+      #     script: |
+      #       docker pull ${{ env.DOCKER_IMAGE }}:latest
+      #       docker stop express-app || true
+      #       docker rm express-app || true
+      #       docker run -d --name express-app -p 3000:3000 ${{ env.DOCKER_IMAGE }}:latest
+      
+      # Step 4: Success notification
+      - name: ✅ Deployment complete
+        run: echo "Application deployed successfully!"
